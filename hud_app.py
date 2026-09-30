@@ -44,81 +44,147 @@ if IS_WINDOWS:
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
 
 
-def _get_antigravity_rect_windows() -> Optional[Tuple[int, int, int, int, bool]]:
-    fg_hwnd = user32.GetForegroundWindow()
+def _get_antigravity_rect_windows(
+    hud_rect: Optional[Tuple[int, int, int, int]] = None,
+    hud_hwnd: int = 0,
+) -> Optional[Tuple[int, int, int, int, bool, bool]]:
     candidates = []
+    windows_above_agy = []
+    found_agy = False
+    agy_data = None
 
     def enum_cb(hwnd, _):
+        nonlocal found_agy, agy_data
         if not user32.IsWindowVisible(hwnd):
             return True
+        if hwnd == hud_hwnd:
+            return True
+
+        # Skip shell, taskbar, desktop
+        cls_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls_buf, 256)
+        cls_name = cls_buf.value
+        if cls_name in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return True
+
+        # Check cloaked (virtual desktops / hidden)
+        cloaked = ctypes.c_int(0)
+        if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0:
+            if cloaked.value != 0:
+                return True
+
+        rect = (ctypes.c_long * 4)()
+        if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+            user32.GetWindowRect(hwnd, rect)
+        w = rect[2] - rect[0]
+        h = rect[3] - rect[1]
+        if w < 60 or h < 60:
+            return True
+
         pid = ctypes.wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
             return True
+
         hproc = kernel32.OpenProcess(0x1000, False, pid.value)
-        if not hproc:
-            return True
-        try:
-            buf = ctypes.create_unicode_buffer(512)
-            size = ctypes.wintypes.DWORD(512)
-            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                exe_path = buf.value.lower()
-                if exe_path.endswith("antigravity.exe"):
-                    iconic = bool(user32.IsIconic(hwnd))
-                    rect = (ctypes.c_long * 4)()
-                    if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
-                        user32.GetWindowRect(hwnd, rect)
-                    w = rect[2] - rect[0]
-                    h = rect[3] - rect[1]
-                    if iconic or (w > 350 and h > 250):
-                        priority = 2 if hwnd == fg_hwnd else 1
-                        candidates.append((priority, w * h, rect[0], rect[1], rect[2], rect[3], iconic))
-        finally:
-            kernel32.CloseHandle(hproc)
+        is_agy = False
+        if hproc:
+            try:
+                buf = ctypes.create_unicode_buffer(512)
+                size = ctypes.wintypes.DWORD(512)
+                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                    if buf.value.lower().endswith("antigravity.exe"):
+                        is_agy = True
+            finally:
+                kernel32.CloseHandle(hproc)
+
+        if is_agy:
+            iconic = bool(user32.IsIconic(hwnd))
+            if iconic or (w > 350 and h > 250):
+                found_agy = True
+                agy_data = (rect[0], rect[1], rect[2], rect[3], iconic)
+                return False  # Stop enumeration at top-most Antigravity window
+        else:
+            if not found_agy:
+                windows_above_agy.append((rect[0], rect[1], rect[2], rect[3]))
+
         return True
 
     user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
-    if not candidates:
+    if not agy_data:
         return None
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    _, _, l, t, r, b, iconic = candidates[0]
-    return (l, t, r, b, iconic)
+
+    l, t, r, b, iconic = agy_data
+    is_covered = False
+
+    # Check if any window above Antigravity in Z-order overlaps with the HUD
+    if hud_rect and not iconic:
+        hl, ht, hr, hb = hud_rect
+        for wl, wt, wr, wb in windows_above_agy:
+            overlap_w = min(hr, wr) - max(hl, wl)
+            overlap_h = min(hb, wb) - max(ht, wt)
+            if overlap_w > 12 and overlap_h > 12:
+                is_covered = True
+                break
+
+    return (l, t, r, b, iconic, is_covered)
 
 
-def _get_antigravity_rect_macos() -> Optional[Tuple[int, int, int, int, bool]]:
-    # Fast AppleScript call to get Antigravity window bounds on macOS
+def _get_antigravity_rect_macos(
+    hud_rect: Optional[Tuple[int, int, int, int]] = None,
+) -> Optional[Tuple[int, int, int, int, bool, bool]]:
     script = '''
     tell application "System Events"
         if not (exists process "Antigravity") then return "NOT_RUNNING"
+        set frontProc to first application process whose frontmost is true
+        set frontName to name of frontProc
         tell process "Antigravity"
             if (count of windows) is 0 then return "NO_WINDOW"
             set w to window 1
             set isMin to value of attribute "AXMinimized" of w
             set {wx, wy} to position of w
             set {ww, wh} to size of w
-            return (wx as text) & "," & (wy as text) & "," & (ww as text) & "," & (wh as text) & "," & (isMin as text)
         end tell
+        if frontName is not "Antigravity" and (count of windows of frontProc) > 0 then
+            set fw to window 1 of frontProc
+            set {fx, fy} to position of fw
+            set {fw_w, fw_h} to size of fw
+            return (wx as text) & "," & (wy as text) & "," & (ww as text) & "," & (wh as text) & "," & (isMin as text) & "," & (fx as text) & "," & (fy as text) & "," & (fw_w as text) & "," & (fw_h as text)
+        end if
+        return (wx as text) & "," & (wy as text) & "," & (ww as text) & "," & (wh as text) & "," & (isMin as text) & ",0,0,0,0"
     end tell
     '''
     try:
         res = subprocess.check_output(["osascript", "-e", script], text=True, timeout=0.8).strip()
         if res in ("NOT_RUNNING", "NO_WINDOW", ""):
             return None
-        parts = res.split(",")
-        if len(parts) == 5:
-            wx, wy, ww, wh = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-            is_min = parts[4].lower() == "true"
-            return (wx, wy, wx + ww, wy + wh, is_min)
+        p = res.split(",")
+        if len(p) >= 9:
+            wx, wy, ww, wh = int(p[0]), int(p[1]), int(p[2]), int(p[3])
+            is_min = p[4].lower() == "true"
+            fx, fy, fw_w, fw_h = int(p[5]), int(p[6]), int(p[7]), int(p[8])
+            is_covered = False
+            if hud_rect and fw_w > 0 and fw_h > 0:
+                hl, ht, hr, hb = hud_rect
+                fl, ft, fr, fb = fx, fy, fx + fw_w, fy + fw_h
+                overlap_w = min(hr, fr) - max(hl, fl)
+                overlap_h = min(hb, fb) - max(ht, ft)
+                if overlap_w > 12 and overlap_h > 12:
+                    is_covered = True
+            return (wx, wy, wx + ww, wy + wh, is_min, is_covered)
     except Exception:
         pass
     return None
 
 
-def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
+def get_antigravity_window_rect(
+    hud_rect: Optional[Tuple[int, int, int, int]] = None,
+    hud_hwnd: int = 0,
+) -> Optional[Tuple[int, int, int, int, bool, bool]]:
     if IS_WINDOWS:
-        return _get_antigravity_rect_windows()
+        return _get_antigravity_rect_windows(hud_rect, hud_hwnd)
     elif IS_MACOS:
-        return _get_antigravity_rect_macos()
+        return _get_antigravity_rect_macos(hud_rect)
     return None
 
 
@@ -259,8 +325,19 @@ class DockedAntigravityHud:
 
     def track_window_loop(self):
         if not self._dragging:
-            rect = get_antigravity_window_rect()
-            if rect is None or rect[4]:  # Closed or minimized
+            cur_h = WIN_H_MINI if self.is_mini else WIN_H
+            hx = self.root.winfo_x()
+            hy = self.root.winfo_y()
+            hud_rect = (hx, hy, hx + WIN_W, hy + cur_h)
+            hud_hwnd = 0
+            if IS_WINDOWS:
+                try:
+                    hud_hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+                except Exception:
+                    pass
+
+            rect = get_antigravity_window_rect(hud_rect, hud_hwnd)
+            if rect is None or rect[4] or rect[5]:  # Closed, minimized, or covered by overlapping window
                 if not self.is_hidden:
                     self.is_hidden = True
                     self.root.withdraw()
@@ -270,13 +347,12 @@ class DockedAntigravityHud:
                     self.root.deiconify()
                     self.root.lift()
                 self._last_agy_rect = rect
-                _, _, r, b, _ = rect
-                cur_h = WIN_H_MINI if self.is_mini else WIN_H
+                _, _, r, b, _, _ = rect
                 tx = r - WIN_W + self.offset_x
                 ty = b - cur_h + self.offset_y
                 self.root.geometry(f"{WIN_W}x{cur_h}+{tx}+{ty}")
         
-        # 35ms on Windows, 100ms on macOS (osascript process-call budget)
+        # 35ms on Windows, 100ms on macOS (AppleScript process budget)
         delay = 35 if IS_WINDOWS else 100
         self.root.after(delay, self.track_window_loop)
 
