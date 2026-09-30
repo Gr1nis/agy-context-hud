@@ -48,84 +48,63 @@ def _get_antigravity_rect_windows(
     hud_rect: Optional[Tuple[int, int, int, int]] = None,
     hud_hwnd: int = 0,
 ) -> Optional[Tuple[int, int, int, int, bool, bool]]:
+    try:
+        hDesk = user32.OpenInputDesktop(0, False, 0x01FF)
+        if hDesk:
+            user32.SetThreadDesktop(hDesk)
+    except Exception:
+        pass
+
+    fg_hwnd = user32.GetForegroundWindow()
     candidates = []
-    windows_above_agy = []
-    found_agy = False
-    agy_data = None
 
     def enum_cb(hwnd, _):
-        nonlocal found_agy, agy_data
         if not user32.IsWindowVisible(hwnd):
             return True
-        if hwnd == hud_hwnd:
-            return True
-
-        # Skip shell, taskbar, desktop
-        cls_buf = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, cls_buf, 256)
-        cls_name = cls_buf.value
-        if cls_name in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
-            return True
-
-        # Check cloaked (virtual desktops / hidden)
-        cloaked = ctypes.c_int(0)
-        if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0:
-            if cloaked.value != 0:
-                return True
-
-        rect = (ctypes.c_long * 4)()
-        if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
-            user32.GetWindowRect(hwnd, rect)
-        w = rect[2] - rect[0]
-        h = rect[3] - rect[1]
-        if w < 60 or h < 60:
-            return True
-
         pid = ctypes.wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
             return True
-
         hproc = kernel32.OpenProcess(0x1000, False, pid.value)
-        is_agy = False
-        if hproc:
-            try:
-                buf = ctypes.create_unicode_buffer(512)
-                size = ctypes.wintypes.DWORD(512)
-                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                    if buf.value.lower().endswith("antigravity.exe"):
-                        is_agy = True
-            finally:
-                kernel32.CloseHandle(hproc)
-
-        if is_agy:
-            iconic = bool(user32.IsIconic(hwnd))
-            if iconic or (w > 350 and h > 250):
-                found_agy = True
-                agy_data = (rect[0], rect[1], rect[2], rect[3], iconic)
-                return False  # Stop enumeration at top-most Antigravity window
-        else:
-            if not found_agy:
-                windows_above_agy.append((rect[0], rect[1], rect[2], rect[3]))
-
+        if not hproc:
+            return True
+        try:
+            buf = ctypes.create_unicode_buffer(512)
+            size = ctypes.wintypes.DWORD(512)
+            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                if buf.value.lower().endswith("antigravity.exe"):
+                    iconic = bool(user32.IsIconic(hwnd))
+                    rect = (ctypes.c_long * 4)()
+                    if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+                        user32.GetWindowRect(hwnd, rect)
+                    w = rect[2] - rect[0]
+                    h = rect[3] - rect[1]
+                    if iconic or (w > 350 and h > 250):
+                        priority = 2 if hwnd == fg_hwnd else 1
+                        candidates.append((priority, w * h, rect[0], rect[1], rect[2], rect[3], iconic, hwnd))
+        finally:
+            kernel32.CloseHandle(hproc)
         return True
 
     user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
-    if not agy_data:
+    if not candidates:
         return None
 
-    l, t, r, b, iconic = agy_data
-    is_covered = False
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    _, _, l, t, r, b, iconic, agy_hwnd = candidates[0]
 
-    # Check if any window above Antigravity in Z-order overlaps with the HUD
-    if hud_rect and not iconic:
-        hl, ht, hr, hb = hud_rect
-        for wl, wt, wr, wb in windows_above_agy:
-            overlap_w = min(hr, wr) - max(hl, wl)
-            overlap_h = min(hb, wb) - max(ht, wt)
-            if overlap_w > 12 and overlap_h > 12:
+    is_covered = False
+    if fg_hwnd and fg_hwnd != agy_hwnd and fg_hwnd != hud_hwnd and not iconic:
+        fg_rect = (ctypes.c_long * 4)()
+        if dwmapi.DwmGetWindowAttribute(fg_hwnd, 9, ctypes.byref(fg_rect), ctypes.sizeof(fg_rect)) != 0:
+            user32.GetWindowRect(fg_hwnd, fg_rect)
+        if hud_rect:
+            hl, ht, hr, hb = hud_rect
+            fl, ft, fr, fb = fg_rect[0], fg_rect[1], fg_rect[2], fg_rect[3]
+            ow = min(hr, fr) - max(hl, fl)
+            oh = min(hb, fb) - max(ht, ft)
+            if ow > 15 and oh > 15:
                 is_covered = True
-                break
 
     return (l, t, r, b, iconic, is_covered)
 
