@@ -215,3 +215,100 @@ class AntigravityContextAnalyzer:
             pass
 
         return stats
+
+    def get_model_quotas(self) -> List["ModelQuotaInfo"]:
+        now = time.time()
+        # Scan recent planner responses in rolling 5-hour window
+        five_h_ago = now - 5 * 3600
+        recent_timestamps: List[float] = []
+
+        if self.brain_dir.exists():
+            for conv in self.brain_dir.iterdir():
+                if not conv.is_dir():
+                    continue
+                log = conv / ".system_generated" / "logs" / "transcript_full.jsonl"
+                if not log.exists():
+                    log = conv / ".system_generated" / "logs" / "transcript.jsonl"
+                if log.exists() and log.stat().st_mtime >= five_h_ago:
+                    try:
+                        for line in log.read_text(encoding="utf-8", errors="ignore").splitlines():
+                            if '"type": "PLANNER_RESPONSE"' in line or '"PLANNER_RESPONSE"' in line:
+                                recent_timestamps.append(log.stat().st_mtime)
+                    except Exception:
+                        pass
+
+        total_recent = len(recent_timestamps)
+        oldest_ts = min(recent_timestamps) if recent_timestamps else (now - 1800)
+
+        # Antigravity models and quotas
+        return [
+            ModelQuotaInfo(
+                id="gemini-flash",
+                name="Gemini 3.8 Flash",
+                limit=None,
+                used=total_recent,
+                reset_hours=0,
+                oldest_ts=None,
+                color="#81c995",
+            ),
+            ModelQuotaInfo(
+                id="gemini-pro",
+                name="Gemini 3.1 Pro",
+                limit=50,
+                used=min(50, total_recent // 2),
+                reset_hours=3,
+                oldest_ts=oldest_ts,
+                color="#8ab4f8",
+            ),
+            ModelQuotaInfo(
+                id="claude-sonnet",
+                name="Claude Sonnet 4.6",
+                limit=40,
+                used=min(40, total_recent // 3),
+                reset_hours=5,
+                oldest_ts=oldest_ts,
+                color="#c58af9",
+            ),
+            ModelQuotaInfo(
+                id="claude-opus",
+                name="Claude Opus 4.6",
+                limit=20,
+                used=min(20, total_recent // 5),
+                reset_hours=5,
+                oldest_ts=oldest_ts,
+                color="#fdd663",
+            ),
+        ]
+
+
+@dataclass
+class ModelQuotaInfo:
+    id: str
+    name: str
+    limit: Optional[int]
+    used: int
+    reset_hours: int
+    oldest_ts: Optional[float]
+    color: str
+
+    @property
+    def remaining(self) -> int:
+        if self.limit is None:
+            return 999999
+        return max(0, self.limit - self.used)
+
+    @property
+    def percent(self) -> float:
+        if self.limit is None:
+            return 100.0
+        return max(0.0, min(100.0, ((self.limit - self.used) / self.limit) * 100.0))
+
+    @property
+    def reset_str(self) -> str:
+        if self.limit is None or not self.oldest_ts:
+            return "Безлимит"
+        rem_sec = max(60, (self.oldest_ts + self.reset_hours * 3600) - time.time())
+        h = int(rem_sec // 3600)
+        m = int((rem_sec % 3600) // 60)
+        return f"сброс {h}ч {m}м" if h > 0 else f"сброс {m}м"
+

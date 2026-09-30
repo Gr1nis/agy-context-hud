@@ -27,6 +27,7 @@ THEME = {
 
 WIN_W = 248
 WIN_H = 88
+WIN_H_LIMITS = 186
 WIN_H_MINI = 26
 
 def fmt_k(tokens: int) -> str:
@@ -173,6 +174,7 @@ class DockedAntigravityHud:
         self.analyzer = AntigravityContextAnalyzer()
         self.is_mini = False
         self.is_hidden = False
+        self.view_mode = "tokens"  # "tokens" or "limits"
         self.offset_x = -16
         self.offset_y = -32
         self._dragging = False
@@ -184,6 +186,11 @@ class DockedAntigravityHud:
         self._build_ui()
         self.track_window_loop()
         self.refresh_stats_loop()
+
+    def _get_target_height(self) -> int:
+        if self.is_mini:
+            return WIN_H_MINI
+        return WIN_H_LIMITS if self.view_mode == "limits" else WIN_H
 
     def _setup_window(self):
         if IS_WINDOWS:
@@ -210,10 +217,10 @@ class DockedAntigravityHud:
     def _on_drag(self, event):
         nx = self.root.winfo_x() + (event.x - self._drag_start_x)
         ny = self.root.winfo_y() + (event.y - self._drag_start_y)
-        cur_h = WIN_H_MINI if self.is_mini else WIN_H
+        cur_h = self._get_target_height()
         self.root.geometry(f"{WIN_W}x{cur_h}+{nx}+{ny}")
         if self._last_agy_rect:
-            _, _, r, b, _ = self._last_agy_rect
+            _, _, r, b, _, _ = self._last_agy_rect
             self.offset_x = nx - (r - WIN_W)
             self.offset_y = ny - (b - cur_h)
 
@@ -222,12 +229,38 @@ class DockedAntigravityHud:
 
     def toggle_mini(self):
         self.is_mini = not self.is_mini
+        cur_body = self.body_limits if self.view_mode == "limits" else self.body_tokens
         if self.is_mini:
-            self.body.pack_forget()
+            cur_body.pack_forget()
             self.btn_mini.config(text="▢")
         else:
-            self.body.pack(fill="both", expand=True, padx=10, pady=(2, 7))
+            cur_body.pack(fill="both", expand=True, padx=8, pady=(2, 6))
             self.btn_mini.config(text="—")
+        self._reapply_geometry()
+
+    def toggle_mode(self):
+        if self.is_mini:
+            self.toggle_mini()
+        if self.view_mode == "tokens":
+            self.view_mode = "limits"
+            self.btn_mode.config(fg=THEME["accent"])
+            self.body_tokens.pack_forget()
+            self.body_limits.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+            self.title_lbl.config(text="Лимиты моделей")
+        else:
+            self.view_mode = "tokens"
+            self.btn_mode.config(fg=THEME["muted"])
+            self.body_limits.pack_forget()
+            self.body_tokens.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+        self._reapply_geometry()
+
+    def _reapply_geometry(self):
+        cur_h = self._get_target_height()
+        if self._last_agy_rect:
+            _, _, r, b, _, _ = self._last_agy_rect
+            tx = r - WIN_W + self.offset_x
+            ty = b - cur_h + self.offset_y
+            self.root.geometry(f"{WIN_W}x{cur_h}+{tx}+{ty}")
 
     def copy_handoff(self):
         self.root.clipboard_clear()
@@ -275,21 +308,27 @@ class DockedAntigravityHud:
         )
         self.btn_copy.pack(side="right", padx=2)
 
-        # Body
-        self.body = tk.Frame(self.outer, bg=THEME["bg"])
-        self.body.pack(fill="both", expand=True, padx=10, pady=(2, 7))
+        self.btn_mode = tk.Button(
+            self.hdr, text="⚡", command=self.toggle_mode, bg=THEME["bg"], fg=THEME["muted"],
+            bd=0, font=(FONT_MAIN, 9), activebackground=THEME["surface"], activeforeground=THEME["accent"], cursor="hand2"
+        )
+        self.btn_mode.pack(side="right", padx=2)
 
-        r1 = tk.Frame(self.body, bg=THEME["bg"])
+        # 1. Body View: Context Tokens
+        self.body_tokens = tk.Frame(self.outer, bg=THEME["bg"])
+        self.body_tokens.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+
+        r1 = tk.Frame(self.body_tokens, bg=THEME["bg"])
         r1.pack(fill="x")
         self.used_lbl = tk.Label(r1, text="0k / 150k", fg=THEME["text"], bg=THEME["bg"], font=(FONT_MAIN, 8, "bold"))
         self.used_lbl.pack(side="left")
         self.free_lbl = tk.Label(r1, text="своб. 150k", fg=THEME["muted"], bg=THEME["bg"], font=(FONT_MAIN, 8))
         self.free_lbl.pack(side="right")
 
-        self.bar = tk.Canvas(self.body, height=4, bg=THEME["surface"], highlightthickness=0)
+        self.bar = tk.Canvas(self.body_tokens, height=4, bg=THEME["surface"], highlightthickness=0)
         self.bar.pack(fill="x", pady=(5, 6))
 
-        r2 = tk.Frame(self.body, bg=THEME["surface"], padx=6, pady=2)
+        r2 = tk.Frame(self.body_tokens, bg=THEME["surface"], padx=6, pady=2)
         r2.pack(fill="x")
         self.cat_lbls = {}
         for key, tag, col in [
@@ -302,9 +341,35 @@ class DockedAntigravityHud:
             lbl.pack(side="left", expand=True)
             self.cat_lbls[key] = (tag, lbl)
 
+        # 2. Body View: Model Limits / Quotas
+        self.body_limits = tk.Frame(self.outer, bg=THEME["bg"])
+        self.model_widgets = {}
+        models_meta = [
+            ("gemini-flash", "Gemini 3.8 Flash", "#81c995"),
+            ("gemini-pro", "Gemini 3.1 Pro", "#8ab4f8"),
+            ("claude-sonnet", "Claude Sonnet 4.6", "#c58af9"),
+            ("claude-opus", "Claude Opus 4.6", "#fdd663"),
+        ]
+        for mid, mname, mcol in models_meta:
+            mf = tk.Frame(self.body_limits, bg=THEME["bg"])
+            mf.pack(fill="x", pady=(1, 3))
+            
+            top_line = tk.Frame(mf, bg=THEME["bg"])
+            top_line.pack(fill="x")
+            
+            nlbl = tk.Label(top_line, text=mname, fg=THEME["text"], bg=THEME["bg"], font=(FONT_MAIN, 7, "bold"))
+            nlbl.pack(side="left")
+            
+            vlbl = tk.Label(top_line, text="...", fg=THEME["muted"], bg=THEME["bg"], font=(FONT_MAIN, 7))
+            vlbl.pack(side="right")
+            
+            mbar = tk.Canvas(mf, height=3, bg=THEME["surface"], highlightthickness=0)
+            mbar.pack(fill="x", pady=(2, 0))
+            self.model_widgets[mid] = (vlbl, mbar, mcol)
+
     def track_window_loop(self):
         if not self._dragging:
-            cur_h = WIN_H_MINI if self.is_mini else WIN_H
+            cur_h = self._get_target_height()
             hx = self.root.winfo_x()
             hy = self.root.winfo_y()
             hud_rect = (hx, hy, hx + WIN_W, hy + cur_h)
@@ -316,7 +381,7 @@ class DockedAntigravityHud:
                     pass
 
             rect = get_antigravity_window_rect(hud_rect, hud_hwnd)
-            if rect is None or rect[4] or rect[5]:  # Closed, minimized, or covered by overlapping window
+            if rect is None or rect[4] or rect[5]:
                 if not self.is_hidden:
                     self.is_hidden = True
                     self.root.withdraw()
@@ -331,7 +396,6 @@ class DockedAntigravityHud:
                 ty = b - cur_h + self.offset_y
                 self.root.geometry(f"{WIN_W}x{cur_h}+{tx}+{ty}")
         
-        # 35ms on Windows, 100ms on macOS (AppleScript process budget)
         delay = 35 if IS_WINDOWS else 100
         self.root.after(delay, self.track_window_loop)
 
@@ -344,7 +408,7 @@ class DockedAntigravityHud:
                 short = stats.title[:20] + ("…" if len(stats.title) > 20 else "")
                 if self.is_mini:
                     self.title_lbl.config(text=f"{short} · {fmt_k(stats.total_tokens)} ({stats.usage_percent:.0f}%)")
-                else:
+                elif self.view_mode == "tokens":
                     self.title_lbl.config(text=short)
                 self.used_lbl.config(text=f"{fmt_k(stats.total_tokens)} / 150k ({stats.usage_percent:.0f}%)")
                 self.free_lbl.config(text=f"своб. {fmt_k(stats.free_smart_tokens)}", fg=zone["color"])
@@ -372,6 +436,29 @@ class DockedAntigravityHud:
                 ]:
                     tag, lbl = self.cat_lbls[key]
                     lbl.config(text=f"{tag}{fmt_k(val)}")
+
+            # Update Model Quotas
+            try:
+                quotas = self.analyzer.get_model_quotas()
+                bw = WIN_W - 20
+                for q in quotas:
+                    if q.id in self.model_widgets:
+                        vlbl, mbar, mcol = self.model_widgets[q.id]
+                        if q.limit is None:
+                            vlbl.config(text="100% · Безлимит", fg="#81c995")
+                            mbar.delete("all")
+                            mbar.create_rectangle(0, 0, bw, 3, fill="#81c995", outline="")
+                        else:
+                            pct = q.percent
+                            txt = f"{q.remaining}/{q.limit} ({pct:.0f}%) · {q.reset_str}"
+                            vlbl.config(text=txt, fg=mcol if pct > 30 else "#f28b82")
+                            mbar.delete("all")
+                            pw = (pct / 100.0) * bw
+                            if pw > 0.5:
+                                mbar.create_rectangle(0, 0, pw, 3, fill=mcol, outline="")
+            except Exception:
+                pass
+
         self.root.after(1200, self.refresh_stats_loop)
 
 
