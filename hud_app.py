@@ -1,9 +1,15 @@
-import ctypes
-import ctypes.wintypes
+import os
+import platform
+import subprocess
 import tkinter as tk
 from typing import Optional, Tuple
 from analyzer import AntigravityContextAnalyzer, ChatContextStats
 
+IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+
+FONT_MAIN = "SF Pro Text" if IS_MACOS else "Segoe UI"
+FONT_MONO = "Menlo" if IS_MACOS else "Consolas"
 
 # Native Antigravity / Google DeepMind Dark Carbon Theme
 THEME = {
@@ -23,20 +29,22 @@ WIN_W = 248
 WIN_H = 88
 WIN_H_MINI = 26
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-dwmapi = ctypes.windll.dwmapi
-WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-
-
 def fmt_k(tokens: int) -> str:
     if tokens >= 1000:
         return f"{tokens / 1000:.1f}k"
     return str(tokens)
 
+# Windows Win32 API imports (conditional to avoid crash on macOS)
+if IS_WINDOWS:
+    import ctypes
+    import ctypes.wintypes
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    dwmapi = ctypes.windll.dwmapi
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
 
-def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
-    """Returns (left, top, right, bottom, is_minimized) of the active Antigravity IDE window."""
+
+def _get_antigravity_rect_windows() -> Optional[Tuple[int, int, int, int, bool]]:
     fg_hwnd = user32.GetForegroundWindow()
     candidates = []
 
@@ -47,7 +55,7 @@ def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
             return True
-        hproc = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        hproc = kernel32.OpenProcess(0x1000, False, pid.value)
         if not hproc:
             return True
         try:
@@ -58,7 +66,6 @@ def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
                 if exe_path.endswith("antigravity.exe"):
                     iconic = bool(user32.IsIconic(hwnd))
                     rect = (ctypes.c_long * 4)()
-                    # DWMWA_EXTENDED_FRAME_BOUNDS = 9 gives exact visible border without invisible shadow
                     if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
                         user32.GetWindowRect(hwnd, rect)
                     w = rect[2] - rect[0]
@@ -76,6 +83,43 @@ def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     _, _, l, t, r, b, iconic = candidates[0]
     return (l, t, r, b, iconic)
+
+
+def _get_antigravity_rect_macos() -> Optional[Tuple[int, int, int, int, bool]]:
+    # Fast AppleScript call to get Antigravity window bounds on macOS
+    script = '''
+    tell application "System Events"
+        if not (exists process "Antigravity") then return "NOT_RUNNING"
+        tell process "Antigravity"
+            if (count of windows) is 0 then return "NO_WINDOW"
+            set w to window 1
+            set isMin to value of attribute "AXMinimized" of w
+            set {wx, wy} to position of w
+            set {ww, wh} to size of w
+            return (wx as text) & "," & (wy as text) & "," & (ww as text) & "," & (wh as text) & "," & (isMin as text)
+        end tell
+    end tell
+    '''
+    try:
+        res = subprocess.check_output(["osascript", "-e", script], text=True, timeout=0.8).strip()
+        if res in ("NOT_RUNNING", "NO_WINDOW", ""):
+            return None
+        parts = res.split(",")
+        if len(parts) == 5:
+            wx, wy, ww, wh = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+            is_min = parts[4].lower() == "true"
+            return (wx, wy, wx + ww, wy + wh, is_min)
+    except Exception:
+        pass
+    return None
+
+
+def get_antigravity_window_rect() -> Optional[Tuple[int, int, int, int, bool]]:
+    if IS_WINDOWS:
+        return _get_antigravity_rect_windows()
+    elif IS_MACOS:
+        return _get_antigravity_rect_macos()
+    return None
 
 
 class DockedAntigravityHud:
@@ -97,10 +141,11 @@ class DockedAntigravityHud:
         self.refresh_stats_loop()
 
     def _setup_window(self):
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+        if IS_WINDOWS:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                pass
         self.root.title("AGY Context HUD")
         self.root.configure(bg=THEME["bg"])
         self.root.overrideredirect(True)
@@ -149,7 +194,7 @@ class DockedAntigravityHud:
         self.outer = tk.Frame(self.root, bg=THEME["bg"], highlightbackground=THEME["border"], highlightthickness=1)
         self.outer.pack(fill="both", expand=True)
 
-        # Minimalist Antigravity Header
+        # Header
         self.hdr = tk.Frame(self.outer, bg=THEME["bg"], height=24, cursor="fleur")
         self.hdr.pack(fill="x", padx=6, pady=(3, 0))
         for w in (self.hdr,):
@@ -157,10 +202,10 @@ class DockedAntigravityHud:
             w.bind("<B1-Motion>", self._on_drag)
             w.bind("<ButtonRelease-1>", self._end_drag)
 
-        self.dot = tk.Label(self.hdr, text="●", fg="#81c995", bg=THEME["bg"], font=("Segoe UI", 8))
+        self.dot = tk.Label(self.hdr, text="●", fg="#81c995", bg=THEME["bg"], font=(FONT_MAIN, 8))
         self.dot.pack(side="left", padx=(2, 4))
 
-        self.title_lbl = tk.Label(self.hdr, text="Antigravity", fg=THEME["text"], bg=THEME["bg"], font=("Segoe UI", 8, "bold"))
+        self.title_lbl = tk.Label(self.hdr, text="Antigravity", fg=THEME["text"], bg=THEME["bg"], font=(FONT_MAIN, 8, "bold"))
         self.title_lbl.pack(side="left")
         for w in (self.dot, self.title_lbl):
             w.bind("<ButtonPress-1>", self._start_drag)
@@ -169,19 +214,19 @@ class DockedAntigravityHud:
 
         btn_close = tk.Button(
             self.hdr, text="×", command=self.root.destroy, bg=THEME["bg"], fg=THEME["muted"],
-            bd=0, font=("Segoe UI", 9), activebackground=THEME["surface"], activeforeground=THEME["text"], cursor="hand2"
+            bd=0, font=(FONT_MAIN, 9), activebackground=THEME["surface"], activeforeground=THEME["text"], cursor="hand2"
         )
         btn_close.pack(side="right", padx=(2, 0))
 
         self.btn_mini = tk.Button(
             self.hdr, text="—", command=self.toggle_mini, bg=THEME["bg"], fg=THEME["muted"],
-            bd=0, font=("Segoe UI", 8), activebackground=THEME["surface"], activeforeground=THEME["text"], cursor="hand2"
+            bd=0, font=(FONT_MAIN, 8), activebackground=THEME["surface"], activeforeground=THEME["text"], cursor="hand2"
         )
         self.btn_mini.pack(side="right", padx=2)
 
         self.btn_copy = tk.Button(
             self.hdr, text="⎘", command=self.copy_handoff, bg=THEME["bg"], fg=THEME["muted"],
-            bd=0, font=("Segoe UI", 9), activebackground=THEME["surface"], activeforeground=THEME["accent"], cursor="hand2"
+            bd=0, font=(FONT_MAIN, 9), activebackground=THEME["surface"], activeforeground=THEME["accent"], cursor="hand2"
         )
         self.btn_copy.pack(side="right", padx=2)
 
@@ -191,16 +236,14 @@ class DockedAntigravityHud:
 
         r1 = tk.Frame(self.body, bg=THEME["bg"])
         r1.pack(fill="x")
-        self.used_lbl = tk.Label(r1, text="0k / 150k", fg=THEME["text"], bg=THEME["bg"], font=("Segoe UI", 8, "bold"))
+        self.used_lbl = tk.Label(r1, text="0k / 150k", fg=THEME["text"], bg=THEME["bg"], font=(FONT_MAIN, 8, "bold"))
         self.used_lbl.pack(side="left")
-        self.free_lbl = tk.Label(r1, text="своб. 150k", fg=THEME["muted"], bg=THEME["bg"], font=("Segoe UI", 8))
+        self.free_lbl = tk.Label(r1, text="своб. 150k", fg=THEME["muted"], bg=THEME["bg"], font=(FONT_MAIN, 8))
         self.free_lbl.pack(side="right")
 
-        # Thin 4px progress track
         self.bar = tk.Canvas(self.body, height=4, bg=THEME["surface"], highlightthickness=0)
         self.bar.pack(fill="x", pady=(5, 6))
 
-        # Subtle micro pill for breakdown
         r2 = tk.Frame(self.body, bg=THEME["surface"], padx=6, pady=2)
         r2.pack(fill="x")
         self.cat_lbls = {}
@@ -210,7 +253,7 @@ class DockedAntigravityHud:
             ("tool", "Тул ", THEME["tool"]),
             ("think", "Мысл ", THEME["think"]),
         ]:
-            lbl = tk.Label(r2, text=f"{tag}0k", fg=col, bg=THEME["surface"], font=("Segoe UI", 7))
+            lbl = tk.Label(r2, text=f"{tag}0k", fg=col, bg=THEME["surface"], font=(FONT_MAIN, 7))
             lbl.pack(side="left", expand=True)
             self.cat_lbls[key] = (tag, lbl)
 
@@ -232,7 +275,10 @@ class DockedAntigravityHud:
                 tx = r - WIN_W + self.offset_x
                 ty = b - cur_h + self.offset_y
                 self.root.geometry(f"{WIN_W}x{cur_h}+{tx}+{ty}")
-        self.root.after(35, self.track_window_loop)
+        
+        # 35ms on Windows, 100ms on macOS (osascript process-call budget)
+        delay = 35 if IS_WINDOWS else 100
+        self.root.after(delay, self.track_window_loop)
 
     def refresh_stats_loop(self):
         if not self.is_hidden:

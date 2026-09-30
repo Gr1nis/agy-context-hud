@@ -32,30 +32,44 @@
 ## 🚀 Запуск и Установка
 
 ### Требования
-- Python 3.10+ (с включённым `tkinter`, который идёт в стандартной поставке Python для Windows).
-- Google Antigravity IDE.
+- **Python 3.10+** (со встроенным `tkinter`).
+- **Google Antigravity IDE**.
+- **macOS**: При первом запуске macOS может запросить разрешение на «Управление универсальным доступом» (Accessibility) для Терминала / Python, чтобы отслеживать положение окна Antigravity через System Events.
 
-### Запуск
-```cmd
-run_hud.bat
-```
-Либо напрямую через Python:
-```bash
-pythonw hud_app.py
-```
+---
 
-### Автозапуск с Windows
-Создайте ярлык для `run_hud.bat` и поместите его в папку автозагрузки Windows (`Win + R` -> `shell:startup`).
+### Windows
+- **Обычный запуск**: Дважды кликните `run_hud.bat` или запустите:
+  ```cmd
+  run_hud.bat
+  ```
+- **Автозагрузка**: Запустите `install_startup.ps1` или добавьте ярлык `run_hud.bat` в `shell:startup`.
+
+---
+
+### macOS
+- **Обычный запуск**:
+  ```bash
+  chmod +x run_hud.sh
+  ./run_hud.sh
+  ```
+- **Автозагрузка при входе в систему (LaunchAgent)**:
+  ```bash
+  chmod +x install_startup.sh
+  ./install_startup.sh
+  ```
 
 ---
 
 ## 🛠 Структура проекта
 
 - `analyzer.py` — Движок анализа логов `transcript_full.jsonl`, калиброванный токенизатор и парсер аннотаций `pbtxt`.
-- `hud_app.py` — Tkinter UI с Win32 DWM трекингом геометрии окна Antigravity.
-- `run_hud.bat` — Тихий запуск через `Shell.Application` на интерактивном рабочем столе.
+- `hud_app.py` — Кроссплатформенный Tkinter UI (Win32 DWM для Windows, AppleScript / System Events для macOS).
+- `run_hud.bat` / `run_hud.sh` — Лаунчеры для Windows и macOS.
+- `install_startup.ps1` / `install_startup.sh` — Скрипты автозапуска для Windows и macOS.
 
 ---
 
 ## 📄 Лицензия
 MIT
+
